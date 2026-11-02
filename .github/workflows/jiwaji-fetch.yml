@@ -6,8 +6,8 @@ on:
   workflow_dispatch:
     inputs:
       workers:
-        description: "How many computers (runners) work at the same time (start with 2-4)"
-        default: "3"
+        description: "GitHub runners for the marksheet step (0 = none; the marksheet site refuses GitHub, use your own PCs)"
+        default: "0"
       year:
         description: "Year to look for new RESULT NOTIFICATIONs (empty = skip that step)"
         default: "2026"
@@ -55,7 +55,7 @@ jobs:
       - name: Number of workers
         id: n
         run: |
-          w="${{ inputs.workers || '3' }}"
+          w="${{ inputs.workers || '0' }}"
           if [ "$w" -gt 20 ]; then w=20; fi
           echo "workers=$w" >> "$GITHUB_OUTPUT"
       - name: Queue status
@@ -63,7 +63,7 @@ jobs:
 
   work:
     needs: plan
-    if: ${{ needs.plan.outputs.queued != '0' && needs.plan.outputs.queued != '' }}
+    if: ${{ needs.plan.outputs.queued != '0' && needs.plan.outputs.queued != '' && needs.plan.outputs.workers != '0' }}
     runs-on: ubuntu-latest
     timeout-minutes: 350
     strategy:
