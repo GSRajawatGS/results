@@ -373,6 +373,11 @@ def get_client():
 
 def upsert(client, table, rows, on_conflict, batch=400):
     rows = [clean_json(r) for r in rows]
+    cols = [c.strip() for c in on_conflict.split(",")]
+    last = {}                      # the same key twice in one upload makes Postgres refuse it: keep the last row
+    for r in rows:
+        last[tuple(r.get(c) for c in cols)] = r
+    rows = list(last.values())
     for i in range(0, len(rows), batch):
         client.table(table).upsert(rows[i:i + batch], on_conflict=on_conflict).execute()
     return len(rows)
@@ -431,9 +436,6 @@ def sync_notification(client, results_xlsx, ledger=None, force=False):
     year = rx.parent.name
     res = read_results(rx, year)
     out = {"skipped": False}
-    upsert(client, "notifications", [{
-        "id": rx.stem, "year": int(year) if year.isdigit() else None, "title": rx.stem,
-        "result_date": s(res["result_date"].iloc[0]) if len(res) else "", "rolls": int(len(res))}], "id")
     r_rows = res.to_dict("records")
     for r in r_rows:
         r["year"] = int(year) if year.isdigit() else None
@@ -442,6 +444,9 @@ def sync_notification(client, results_xlsx, ledger=None, force=False):
         ms = read_marksheets(mx, rx.stem, year)
         rows = drop_weaker(_ms_rows(ms, read_raw(mx)), remote_ok_keys(client, rx.stem))
         out["marksheets"] = upsert(client, "marksheets", rows, "notification,sr_no,roll_no")
+    upsert(client, "notifications", [{
+        "id": rx.stem, "year": int(year) if year.isdigit() else None, "title": rx.stem,
+        "result_date": s(res["result_date"].iloc[0]) if len(res) else "", "rolls": int(len(res))}], "id")
     if ledger is not None:
         ledger.mark(rx.stem, rx, mx)
     return out
