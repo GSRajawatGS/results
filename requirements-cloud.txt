@@ -1,0 +1,7 @@
+pandas
+openpyxl
+supabase
+playwright
+pdfplumber
+selenium
+python-dotenv

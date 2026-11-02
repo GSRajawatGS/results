@@ -1,0 +1,10 @@
+.env
+*.xlsx
+*.pdf
+*.failed
+overrides.json
+ledger.json
+exam_list_*.json
+20[0-9][0-9]/
+__pycache__/
+.streamlit/secrets.toml

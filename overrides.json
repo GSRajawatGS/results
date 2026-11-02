@@ -1,0 +1,18 @@
+{
+ "2025|DEC|BEDMED|3S|": {
+  "code": "RBMED3",
+  "name": "B.Ed.M.Ed THIRD SEMESTER EXAM.DEC.-2025(REVISED)",
+  "course": "B.Ed.M.Ed THIRD SEMESTER EXAM.DEC.-2025",
+  "skip": false,
+  "decided_at": "2026-10-24 11:39:15",
+  "by": "manual"
+ },
+ "2025|DEC|BSCBED|7S|": {
+  "code": "BSBD7",
+  "name": "B.Sc. B.Ed. SEVENTH SEMESTER EXAM. DEC.-2025",
+  "course": "B.Sc.B.Ed SEVENTH SEMESTER EXAM. DEC.-2025",
+  "skip": false,
+  "decided_at": "2026-10-24 11:46:39",
+  "by": "manual"
+ }
+}
