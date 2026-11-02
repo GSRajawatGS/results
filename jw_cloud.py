@@ -298,6 +298,11 @@ def work(client, worker, max_minutes=330, headless=True, stagger=True):
                     total["jobs"] += 1
                     total["failed"] += 1 if bad else 0
                     print(f"[{worker}] job {job['id']} {'had errors' if bad else 'done'}: {counts}")
+                except KeyboardInterrupt:                 # Ctrl+C: give the job back at once instead of making it wait for its lease
+                    try:
+                        release(client, job, "stopped by the user")
+                    finally:
+                        raise
                 except SiteUnavailable as e:
                     site_fails += 1
                     br.close()
