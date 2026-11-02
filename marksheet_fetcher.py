@@ -375,8 +375,11 @@ def _fetch_with_exam(br, rs, cand, rolls, on_found, on_error):
                     on_found(roll, fields, raw, cand)
                     todo.remove(roll)
                     errors = 0
-                    print(f"   {tag} {roll}: OK  {'' if os.environ.get('JW_QUIET') else fields.get('Marksheet Name', '')}  {fields.get('Final Total', '')}  "
-                          f"{fields.get('Final Result', '')}".rstrip())
+                    if os.environ.get("JW_QUIET"):          # shared logs: no names, no marks
+                        print(f"   {tag} {roll}: OK")
+                    else:
+                        print(f"   {tag} {roll}: OK  {fields.get('Marksheet Name', '')}  {fields.get('Final Total', '')}  "
+                              f"{fields.get('Final Result', '')}".rstrip())
                 elif status == "NOT FOUND":
                     errors = 0
                     print(f"   {tag} {roll}: not found here")
