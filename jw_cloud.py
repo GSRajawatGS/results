@@ -30,7 +30,7 @@ import sys
 import tempfile
 import time
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -119,7 +119,7 @@ def finish(client, job, status, summary=None, error=None):
     def go():
         client.table("fetch_jobs").update({
             "status": status, "summary": js.clean_json(summary), "last_error": error,
-            "finished_at": f"{datetime.utcnow():%Y-%m-%dT%H:%M:%SZ}", "lease_until": None,
+            "finished_at": f"{datetime.now(timezone.utc):%Y-%m-%dT%H:%M:%SZ}", "lease_until": None,
         }).eq("id", job["id"]).eq("worker", job["worker"]).execute()
     _retry(go, what="finish")
 
@@ -208,6 +208,20 @@ def _claimable(client):
 # --------------------------------------------------------------------------
 # a worker
 # --------------------------------------------------------------------------
+class SiteUnavailable(Exception):
+    """The marksheet site cannot be used from this computer (blocked, down, or its page looks different)."""
+
+
+MAX_SITE_FAILURES = 3          # in a row, then this worker stops instead of wasting time (and GitHub minutes)
+
+
+def release(client, job, why):
+    """Give the job back to the queue untouched (this attempt does not count)."""
+    client.table("fetch_jobs").update({
+        "status": "pending", "worker": None, "lease_until": None, "attempts": max(0, int(job["attempts"]) - 1),
+        "last_error": why[:300]}).eq("id", job["id"]).eq("worker", job["worker"]).execute()
+
+
 def run_job(client, p, br, rs, job, workdir, lists_pushed):
     """Fetch the marksheets of one job and upload them. Returns the counts dict."""
     import marksheet_fetcher as mf
@@ -218,6 +232,11 @@ def run_job(client, p, br, rs, job, workdir, lists_pushed):
     cache_dir.mkdir(parents=True, exist_ok=True)
     job_dir = workdir / f"job{job['id']}"
     job_dir.mkdir(parents=True, exist_ok=True)
+
+    try:                                                   # without the site's exam list nothing can be matched:
+        mf.exam_list(p, year, cache_dir)                   # stop here, write nothing, let the job go back to the queue
+    except Exception as e:
+        raise SiteUnavailable(f"exam list of {year}: {str(e)[:200]}")
 
     ov = js.Overrides(workdir / "overrides.json")         # the human's exam choices, always the latest
     try:
@@ -257,7 +276,7 @@ def work(client, worker, max_minutes=330, headless=True, stagger=True):
         time.sleep(random.uniform(0, 15))
     deadline = time.time() + max_minutes * 60
     workdir = Path(tempfile.mkdtemp(prefix="jwworker_"))
-    lists_pushed, total = set(), {"jobs": 0, "failed": 0}
+    lists_pushed, total, site_fails = set(), {"jobs": 0, "failed": 0}, 0
     print(f"[{worker}] started; will stop after {max_minutes} minutes or when the queue is empty")
     with sync_playwright() as p:
         br = mf._Browser(p, headless)
@@ -272,12 +291,25 @@ def work(client, worker, max_minutes=330, headless=True, stagger=True):
                 t0 = time.time()
                 try:
                     counts = run_job(client, p, br, rs, job, workdir, lists_pushed)
+                    site_fails = 0
                     bad = counts.get("ERROR", 0)
                     finish(client, job, "failed" if bad else "done", {**counts, "seconds": int(time.time() - t0)},
                            f"{bad} roll number(s) had errors" if bad else None)
                     total["jobs"] += 1
                     total["failed"] += 1 if bad else 0
                     print(f"[{worker}] job {job['id']} {'had errors' if bad else 'done'}: {counts}")
+                except SiteUnavailable as e:
+                    site_fails += 1
+                    br.close()
+                    release(client, job, f"SiteUnavailable: {e}")
+                    print(f"[{worker}] the site is not usable from here ({e}); job {job['id']} given back "
+                          f"({site_fails}/{MAX_SITE_FAILURES})")
+                    if site_fails >= MAX_SITE_FAILURES:
+                        print(f"[{worker}] STOPPING: the marksheet site does not work from this computer. "
+                              f"Run the worker on a PC where the site opens in a browser.")
+                        total["site_blocked"] = True
+                        break
+                    time.sleep(10)
                 except Exception as e:                    # a bug or a broken page: report it and go on with the next job
                     traceback.print_exc()
                     br.close()
@@ -288,8 +320,15 @@ def work(client, worker, max_minutes=330, headless=True, stagger=True):
                     total["failed"] += 1
         finally:
             br.close()
+            for d in workdir.glob("*/debug"):              # screenshots of what the site showed (the workflow uploads them)
+                try:
+                    shutil.copytree(d, HERE / "debug_out" / d.parent.name, dirs_exist_ok=True)
+                except Exception:
+                    pass
             shutil.rmtree(workdir, ignore_errors=True)
     print(f"[{worker}] finished: {total}")
+    if total.get("site_blocked"):
+        sys.exit(3)                                       # shows as a failed worker in GitHub
     return total
 
 
