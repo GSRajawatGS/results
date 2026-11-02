@@ -91,3 +91,11 @@ jobs:
       - name: Work through the queue
         if: steps.gate.outputs.go == 'yes'
         run: python jw_cloud.py work --worker "gh-${{ github.run_id }}-${{ matrix.worker }}" --max-minutes 330
+      - name: Keep the screenshots of what the site showed (no student data)
+        if: ${{ always() && steps.gate.outputs.go == 'yes' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: site-debug-${{ matrix.worker }}
+          path: debug_out/
+          if-no-files-found: ignore
+          retention-days: 3
