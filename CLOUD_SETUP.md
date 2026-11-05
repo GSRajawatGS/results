@@ -5,7 +5,7 @@ fetches the marksheets, uploads them, and takes another. The database gives each
 nothing is fetched twice. A worker that dies loses its job after 15 minutes and another worker takes it.
 
 ## One-time setup
-1. Supabase SQL editor: run `supabase_schema.sql`, then `supabase_queue.sql`.
+1. Supabase SQL editor: run `supabase_schema.sql`, then `supabase_queue.sql`, then `supabase_views.sql` (fast search and the course list for the app).
 2. Create a **private** GitHub repository (it handles student data - never make it public).
 3. Put these files in it: `jiwaji_results_scraper.py`, `jw_store.py`, `jw_cloud.py`, `marksheet_fetcher.py`,
    `result_scraper.py`, `result_jobs.py` (your own files), `jw_app.py`, `requirements-cloud.txt`, `.gitignore`,
