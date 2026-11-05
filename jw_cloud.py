@@ -147,43 +147,48 @@ def plan(client, chunk=CHUNK, retry=False):
     """Queue every roll number that still needs a marksheet. Returns a summary dict."""
     import marksheet_fetcher as mf
     reaped = reap(client)
-    res = pd.DataFrame(js.fetch_all(client, "notification_results",
-                                    "notification,sr_no,roll_no,year,course,result,result_date", order=js.KEYS))
     out = {"reaped": reaped, "new_jobs": 0, "new_rolls": 0, "already_queued": 0, "up_to_date_rolls": 0, "skipped_courses": 0}
-    if res.empty:
+    notifs = [r["id"] for r in js.fetch_all(client, "notifications", "id", order=("id",))]
+    if not notifs:
         print("   No roll numbers in Supabase yet - upload them first (jiwaji_results_scraper.py --central, or jw_store.py sync).")
         out["claimable"] = _claimable(client)
         return out
-    known = {(r["notification"], r["sr_no"], r["roll_no"]): r for r in js.fetch_all(
-        client, "marksheets", "notification,sr_no,roll_no,status,exam_code,fetched_at", order=js.KEYS)}
     ov = _overrides(client)
     active = _active(client)
 
     new_jobs = []
-    for (notif, sr), g in res.groupby(["notification", "sr_no"], sort=False):
-        course, rdate = js.s(g["course"].iloc[0]), js.s(g["result_date"].iloc[0])
-        o = ov.get(mf.course_key(course, rdate))
-        if o and o.get("skip"):
-            out["skipped_courses"] += 1
+    for notif in notifs:                       # one notification at a time: small queries, no database timeouts
+        res = pd.DataFrame(js.fetch_all(client, "notification_results", "notification,sr_no,roll_no,year,course,result,result_date",
+                                        order=("sr_no", "roll_no"), where={"notification": notif}))
+        if res.empty:
             continue
-        ov_code = o.get("code") if o and o.get("code") else None
-        need = []
-        for r in g.itertuples(index=False):
-            m = known.get((r.notification, r.sr_no, r.roll_no), {})
-            if needs_work(m.get("status"), m.get("exam_code"), m.get("fetched_at"), ov_code, retry):
-                need.append((js.s(r.roll_no), js.s(r.result)))
-            else:
-                out["up_to_date_rolls"] += 1
-        need.sort()
-        for i in range(0, len(need), chunk):
-            part = need[i:i + chunk]
-            key = f"{notif}|{sr}|{hashlib.sha1(','.join(r for r, _ in part).encode()).hexdigest()[:10]}"
-            if key in active:
-                out["already_queued"] += 1
+        known = {(r["sr_no"], r["roll_no"]): r for r in js.fetch_all(
+            client, "marksheets", "sr_no,roll_no,status,exam_code,fetched_at", order=("sr_no", "roll_no"),
+            where={"notification": notif})}
+        for sr, g in res.groupby("sr_no", sort=False):
+            course, rdate = js.s(g["course"].iloc[0]), js.s(g["result_date"].iloc[0])
+            o = ov.get(mf.course_key(course, rdate))
+            if o and o.get("skip"):
+                out["skipped_courses"] += 1
                 continue
-            new_jobs.append({"job_key": key, "notification": notif, "sr_no": sr, "year": _year(g["year"].iloc[0]),
-                             "course": course, "result_date": rdate, "rolls": dict(part)})
-            out["new_rolls"] += len(part)
+            ov_code = o.get("code") if o and o.get("code") else None
+            need = []
+            for r in g.itertuples(index=False):
+                m = known.get((r.sr_no, r.roll_no), {})
+                if needs_work(m.get("status"), m.get("exam_code"), m.get("fetched_at"), ov_code, retry):
+                    need.append((js.s(r.roll_no), js.s(r.result)))
+                else:
+                    out["up_to_date_rolls"] += 1
+            need.sort()
+            for i in range(0, len(need), chunk):
+                part = need[i:i + chunk]
+                key = f"{notif}|{sr}|{hashlib.sha1(','.join(r for r, _ in part).encode()).hexdigest()[:10]}"
+                if key in active:
+                    out["already_queued"] += 1
+                    continue
+                new_jobs.append({"job_key": key, "notification": notif, "sr_no": sr, "year": _year(g["year"].iloc[0]),
+                                 "course": course, "result_date": rdate, "rolls": dict(part)})
+                out["new_rolls"] += len(part)
 
     for i in range(0, len(new_jobs), 100):
         batch = new_jobs[i:i + 100]
