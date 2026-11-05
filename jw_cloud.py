@@ -203,6 +203,10 @@ def plan(client, chunk=CHUNK, retry=False):
                 except Exception:
                     out["already_queued"] += 1
     out["claimable"] = _claimable(client)
+    try:
+        js.refresh_summary(client)                 # the app's course list shows the new counts
+    except Exception as e:
+        print(f"   (course summary not refreshed: {type(e).__name__}: {str(e)[:100]})")
     return out
 
 
@@ -380,7 +384,7 @@ def print_status(client):
 def main():
     import argparse
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["plan", "work", "status", "reap"])
+    ap.add_argument("command", choices=["plan", "work", "status", "reap", "refresh"])
     ap.add_argument("--retry", action="store_true", help="plan: also look again at NOT FOUND roll numbers")
     ap.add_argument("--chunk", type=int, default=CHUNK)
     ap.add_argument("--github-output", action="store_true", help="plan: write queued=<n> for the GitHub workflow")
@@ -401,6 +405,9 @@ def main():
                 f.write(f"queued={r['claimable']}\n")
     elif a.command == "work":
         work(client, a.worker, a.max_minutes, headless=not a.headed, stagger=not a.no_stagger)
+    elif a.command == "refresh":
+        js.refresh_summary(client)
+        print("course summary refreshed")
     elif a.command == "reap":
         print(f"{reap(client)} lost job(s) marked failed")
     else:
