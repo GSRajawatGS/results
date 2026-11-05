@@ -134,6 +134,21 @@ def remote_history(roll, enrollment):
     return js.sb_history(js.get_client(), roll, enrollment)
 
 
+def refresh_button():
+    """Supabase mode: the course list is a stored summary; this recounts it."""
+    sm = load_data("Supabase", "")["summary"]
+    when = sm["refreshed_at"].max() if len(sm) and "refreshed_at" in sm else ""
+    c1, c2 = st.columns([4, 1])
+    c1.caption(f"Course counts as of {str(when)[:16].replace('T', ' ')} UTC" if when else "Course counts: not calculated yet")
+    if c2.button("Refresh the summary"):
+        try:
+            js.refresh_summary()
+            load_data.clear()
+            st.rerun()
+        except Exception as e:
+            st.error(f"{type(e).__name__}: {str(e)[:200]}  (run supabase_views.sql first)")
+
+
 def need_data(source, root):
     try:
         data = load_data(source, root)
@@ -182,6 +197,8 @@ def page_search(source, root):
     mode = c2.selectbox("Search by", js.SEARCH_MODES, help="Auto-detect: digits = roll number, letters + digits = "
                                                             "enrollment number, letters = name (then parents' names).")
     base = data["summary"] if remote else df
+    if remote:
+        refresh_button()
     with st.expander("Filters"):
         f1, f2, f3 = st.columns(3)
         years = f1.multiselect("Year", sorted(base["year"].dropna().unique()))
@@ -280,6 +297,8 @@ def page_browse(source, root):
     if data is None:
         return
     remote = bool(data.get("remote"))
+    if remote:
+        refresh_button()
     df = data["summary"] if remote else data["combined"]
     years = sorted(df["year"].dropna().unique(), reverse=True)
     year = st.selectbox("Year", ["(all)"] + years)
