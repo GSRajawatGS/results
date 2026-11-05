@@ -383,10 +383,13 @@ def upsert(client, table, rows, on_conflict, batch=400):
     return len(rows)
 
 
-def fetch_all(client, table, columns="*", order=(), page=1000):
+def fetch_all(client, table, columns="*", order=(), page=1000, where=None):
+    """All rows of a table (or of the rows where column = value), page by page. Prefer `where` on big tables."""
     out, start = [], 0
     while True:
         q = client.table(table).select(columns)
+        for k, v in (where or {}).items():
+            q = q.eq(k, v)
         for o in order:
             q = q.order(o)
         rows = q.range(start, start + page - 1).execute().data or []
@@ -503,20 +506,128 @@ def pull_overrides(client, ov):
 _MS_SELECT = ",".join(c for c in MS_COLS if c not in ("year", "course", "result", "result_date"))
 
 
-def load_supabase(client=None):
-    client = client or get_client()
-    res = pd.DataFrame(fetch_all(client, "notification_results", order=KEYS)).reindex(columns=RES_COLS)
-    res = res.fillna("")
+_MS_DB_COLS = [c for c in MS_COLS if c not in ("year", "course", "result", "result_date")]
+
+
+def _assemble(res_rows, ms_rows):
+    """Rows from notification_results and marksheets -> the 'combined' table (one row per roll number)."""
+    res = pd.DataFrame(res_rows).reindex(columns=RES_COLS).fillna("")
     res["year"] = res["year"].map(lambda v: str(int(v)) if s(v).replace(".0", "").isdigit() else s(v))
-    ms = pd.DataFrame(fetch_all(client, "marksheets", _MS_SELECT, order=KEYS))
-    ms = ms.reindex(columns=[c for c in MS_COLS if c not in ("year", "course", "result", "result_date")])
+    ms = pd.DataFrame(ms_rows).reindex(columns=_MS_DB_COLS)
     ms["fields"] = ms["fields"].map(lambda v: v if isinstance(v, dict) else {})
     for c in ("status", "note", "matched_exam", "exam_code", "fetched_at", "name", "father_name", "mother_name",
               "enrollment_no", "final_result", "final_total"):
         ms[c] = ms[c].fillna("")
     ms["match_score"] = pd.to_numeric(ms["match_score"], errors="coerce")
     full_ms = ms.merge(res[KEYS + ["year", "course", "result", "result_date"]], on=KEYS, how="left")
-    return {"results": res, "marksheets": full_ms, "combined": combine(res, full_ms)}
+    return res, full_ms, combine(res, full_ms)
+
+
+def load_supabase(client=None):
+    """EVERYTHING in memory - only for small databases (the app uses the sb_* functions below instead)."""
+    client = client or get_client()
+    res_rows = fetch_all(client, "notification_results", order=KEYS)
+    ms_rows = fetch_all(client, "marksheets", _MS_SELECT, order=KEYS)
+    res, full_ms, comb = _assemble(res_rows, ms_rows)
+    return {"results": res, "marksheets": full_ms, "combined": comb}
+
+
+# ---- big databases: ask Supabase only for what a page shows ---------------------------------------------
+def sb_course_summary(client=None):
+    """One row per notification + course (view course_summary in supabase_views.sql)."""
+    client = client or get_client()
+    df = pd.DataFrame(fetch_all(client, "course_summary", order=("notification", "sr_no")))
+    if df.empty:
+        return df
+    df["year"] = df["year"].map(lambda v: str(int(v)) if s(v).replace(".0", "").isdigit() else s(v))
+    for c in ("statuses", "tried", "course", "result_date"):
+        df[c] = df[c].fillna("")
+    return df
+
+
+def sb_course(client, notification, sr_no):
+    """All roll numbers of one course of one notification, with their marksheets."""
+    client = client or get_client()
+    res = fetch_all(client, "notification_results", order=("roll_no",), where={"notification": notification, "sr_no": sr_no})
+    ms = fetch_all(client, "marksheets", _MS_SELECT, order=("roll_no",), where={"notification": notification, "sr_no": sr_no})
+    return _assemble(res, ms)[2]
+
+
+def _results_of(client, ms_rows, extra=()):
+    keys = {(r["notification"], r["sr_no"], r["roll_no"]) for r in ms_rows}
+    rolls = sorted({k[2] for k in keys})
+    found = {}
+    for i in range(0, len(rolls), 100):
+        for r in (client.table("notification_results").select("*").in_("roll_no", rolls[i:i + 100]).execute().data or []):
+            found[(r["notification"], r["sr_no"], r["roll_no"])] = r
+    out = [r for k, r in found.items() if k in keys]
+    seen = {(r["notification"], r["sr_no"], r["roll_no"]) for r in out}
+    return out + [r for r in extra if (r["notification"], r["sr_no"], r["roll_no"]) not in seen]
+
+
+def _clean_tok(t):
+    return re.sub(r"[%_\\*(),]", "", t)
+
+
+def sb_search(client, q, mode="Auto-detect", limit=600, summary=None):
+    """Candidate rows (combined table) for a search; the caller ranks them with search(). Only the matching rows leave
+    the database, so it works with hundreds of thousands of students."""
+    client = client or get_client()
+    q = q.strip()
+    toks = [x for x in (_clean_tok(t) for t in re.split(r"[\s,.]+", q)) if x]
+    if not toks:
+        return _assemble([], [])[2]
+    digits = q.replace(" ", "").isdigit()
+    code_like = bool(re.fullmatch(r"(?=.*\d)(?=.*[A-Za-z])[A-Za-z0-9/_-]{5,}", q))
+    m = mode if mode != "Auto-detect" else ("Roll number" if digits else ("Enrollment number" if code_like else "Name / part of name"))
+
+    def ms_where(column, tokens, prefix=False):
+        x = client.table("marksheets").select(_MS_SELECT)
+        for t in tokens:
+            x = x.ilike(column, f"%{t[:3] if prefix else t}%")
+        return x.limit(limit).execute().data or []
+
+    ms_rows, extra = [], []
+    if m == "Roll number":
+        roll = q.replace(" ", "")
+        ms_rows = client.table("marksheets").select(_MS_SELECT).eq("roll_no", roll).limit(limit).execute().data or []
+        extra = client.table("notification_results").select("*").eq("roll_no", roll).limit(limit).execute().data or []
+    elif m == "Enrollment number":
+        ms_rows = client.table("marksheets").select(_MS_SELECT).ilike("enrollment_no", q).limit(limit).execute().data or []
+        if not ms_rows and mode == "Auto-detect":      # letters+digits that is really a roll number
+            extra = client.table("notification_results").select("*").eq("roll_no", q).limit(limit).execute().data or []
+    elif m == "Father's / mother's name":
+        ms_rows = ms_where("father_name", toks) + ms_where("mother_name", toks)
+    elif m == "Course / exam":
+        if summary is not None and len(summary):
+            hay = (summary["course"].astype(str) + " " + summary["notification"].astype(str)).str.upper()
+            hit = summary[[all(t.upper() in h for t in toks) for h in hay]].head(5)
+            frames = [sb_course(client, r.notification, r.sr_no) for r in hit.itertuples()]
+            return pd.concat(frames, ignore_index=True) if frames else _assemble([], [])[2]
+        return _assemble([], [])[2]
+    else:                                              # name or part of it
+        ms_rows = ms_where("name", toks)
+        if not ms_rows:
+            ms_rows = ms_where("father_name", toks) + ms_where("mother_name", toks)
+        if not ms_rows:                                # small spelling mistakes: students sharing the first letters of ANY
+            for tk in sorted(toks, key=len, reverse=True)[:3]:   # word (longest words first), ranked afterwards by search()
+                if len(tk) >= 3:
+                    ms_rows += ms_where("name", [tk], prefix=True)
+    dedup = {(r["notification"], r["sr_no"], r["roll_no"]): r for r in ms_rows}
+    ms_rows = list(dedup.values())
+    return _assemble(_results_of(client, ms_rows, extra), ms_rows)[2]
+
+
+def sb_history(client, roll, enrollment=""):
+    """Every notification a student appears in (same roll number or enrollment number)."""
+    client = client or get_client()
+    ms = client.table("marksheets").select(_MS_SELECT).eq("roll_no", roll).limit(300).execute().data or []
+    if enrollment:
+        ms += client.table("marksheets").select(_MS_SELECT).ilike("enrollment_no", enrollment).limit(300).execute().data or []
+    extra = client.table("notification_results").select("*").eq("roll_no", roll).limit(300).execute().data or []
+    dedup = {(r["notification"], r["sr_no"], r["roll_no"]): r for r in ms}
+    ms = list(dedup.values())
+    return _assemble(_results_of(client, ms, extra), ms)[2]
 
 
 def load_exam_list_supabase(client=None):
