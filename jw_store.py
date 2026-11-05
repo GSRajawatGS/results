@@ -540,9 +540,14 @@ def sb_course_summary(client=None):
     if df.empty:
         return df
     df["year"] = df["year"].map(lambda v: str(int(v)) if s(v).replace(".0", "").isdigit() else s(v))
-    for c in ("statuses", "tried", "course", "result_date"):
-        df[c] = df[c].fillna("")
+    for c in ("statuses", "tried", "course", "result_date", "refreshed_at"):
+        df[c] = df[c].fillna("") if c in df else ""
     return df
+
+
+def refresh_summary(client=None):
+    """Recount the course summary the app shows (SQL function refresh_course_summary)."""
+    (client or get_client()).rpc("refresh_course_summary", {}).execute()
 
 
 def sb_course(client, notification, sr_no):
