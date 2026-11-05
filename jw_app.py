@@ -113,7 +113,25 @@ def csv_bytes(df):
 
 @st.cache_data(ttl=600, show_spinner="Loading the data ...")
 def load_data(source, root):
+    if source == "Supabase":                      # big database: only the course list is loaded; pages ask for the rest
+        return {"remote": True, "summary": js.sb_course_summary(), "combined": None}
     return js.load(source, root)
+
+
+@st.cache_data(ttl=120, show_spinner="Searching ...")
+def remote_search(q, mode):
+    summary = load_data("Supabase", "")["summary"]
+    return js.sb_search(js.get_client(), q, mode, summary=summary)
+
+
+@st.cache_data(ttl=120)
+def remote_course(notification, sr_no):
+    return js.sb_course(js.get_client(), notification, sr_no)
+
+
+@st.cache_data(ttl=120)
+def remote_history(roll, enrollment):
+    return js.sb_history(js.get_client(), roll, enrollment)
 
 
 def need_data(source, root):
@@ -122,7 +140,8 @@ def need_data(source, root):
     except Exception as e:
         st.error(f"Could not load the data from {source}: {type(e).__name__}: {str(e)[:250]}")
         return None
-    if data["combined"].empty:
+    empty = data["summary"].empty if data.get("remote") else data["combined"].empty
+    if empty:
         st.info("No data yet. " + ("Run 'Download' on the Run & sync page, then upload to Supabase."
                                    if source == "Supabase" else
                                    f"No notification Excel files were found under {root}."))
@@ -154,18 +173,31 @@ def page_search(source, root):
     data = need_data(source, root)
     if data is None:
         return
-    df = data["combined"]
+    remote = bool(data.get("remote"))
+    df = None if remote else data["combined"]
 
     c1, c2 = st.columns([3, 2])
     q = c1.text_input("Search", placeholder="name, part of a name, roll number, enrollment number ...",
                       key="q").strip()
     mode = c2.selectbox("Search by", js.SEARCH_MODES, help="Auto-detect: digits = roll number, letters + digits = "
                                                             "enrollment number, letters = name (then parents' names).")
+    base = data["summary"] if remote else df
     with st.expander("Filters"):
         f1, f2, f3 = st.columns(3)
-        years = f1.multiselect("Year", sorted(df["year"].dropna().unique()))
-        notifs = f2.multiselect("Notification", sorted(df["notification"].dropna().unique()))
+        years = f1.multiselect("Year", sorted(base["year"].dropna().unique()))
+        notifs = f2.multiselect("Notification", sorted(base["notification"].dropna().unique()))
         only_ok = f3.checkbox("Only students with a marksheet", value=False)
+
+    if not q:
+        st.info("Type a name (even half of it, words in any order, small spelling mistakes are tolerated), a roll "
+                "number, or an enrollment number.")
+        return
+    if remote:
+        try:
+            df = remote_search(q, mode)
+        except Exception as e:
+            st.error(f"Search failed: {type(e).__name__}: {str(e)[:250]}  (did you run supabase_views.sql?)")
+            return
     if years:
         df = df[df["year"].isin(years)]
     if notifs:
@@ -173,10 +205,6 @@ def page_search(source, root):
     if only_ok:
         df = df[df["status"] == "OK"]
 
-    if not q:
-        st.info("Type a name (even half of it, words in any order, small spelling mistakes are tolerated), a roll "
-                "number, or an enrollment number.")
-        return
     hits, msg = js.search(df, q, mode)
     if hits.empty:
         st.warning(f"Nothing found for '{q}'" + ("" if mode == "Auto-detect" else f" ({mode})") + ".")
@@ -217,7 +245,13 @@ def page_search(source, root):
         st.markdown("**Papers**")
         st.dataframe(papers, hide_index=True)
 
-    same = data["combined"]
+    if remote:
+        try:
+            same = remote_history(row["roll_no"], row["enrollment_no"] or "")
+        except Exception:
+            same = df
+    else:
+        same = data["combined"]
     mask = same["roll_no"] == row["roll_no"]
     if row["enrollment_no"]:
         mask |= same["enrollment_no"] == row["enrollment_no"]
@@ -245,13 +279,15 @@ def page_browse(source, root):
     data = need_data(source, root)
     if data is None:
         return
-    df = data["combined"]
+    remote = bool(data.get("remote"))
+    df = data["summary"] if remote else data["combined"]
     years = sorted(df["year"].dropna().unique(), reverse=True)
     year = st.selectbox("Year", ["(all)"] + years)
     d = df if year == "(all)" else df[df["year"] == year]
-    summ = js.summarize(d)
-    st.dataframe(summ.rename(columns=lambda c: c.replace("_", " ")), hide_index=True)
-    st.download_button("Download this summary (CSV)", csv_bytes(summ), file_name="summary.csv")
+    summ = d if remote else js.summarize(d)
+    shown_cols = [c for c in summ.columns if c not in ("year", "result_date", "statuses", "tried")]
+    st.dataframe(summ[shown_cols].rename(columns=lambda c: c.replace("_", " ")), hide_index=True)
+    st.download_button("Download this summary (CSV)", csv_bytes(summ[shown_cols]), file_name="summary.csv")
 
     st.subheader("Students of one course")
     opts = [f"{r['notification'][:40]}  |  {r['sr_no']}. {r['course'][:70]}" for _, r in summ.iterrows()]
@@ -259,7 +295,14 @@ def page_browse(source, root):
         return
     k = st.selectbox("Notification and course", range(len(opts)), format_func=lambda i: opts[i])
     sel = summ.iloc[k]
-    cls = d[(d["notification"] == sel["notification"]) & (d["sr_no"] == sel["sr_no"])]
+    if remote:
+        try:
+            cls = remote_course(sel["notification"], sel["sr_no"])
+        except Exception as e:
+            st.error(f"Could not load this course: {type(e).__name__}: {str(e)[:250]}")
+            return
+    else:
+        cls = d[(d["notification"] == sel["notification"]) & (d["sr_no"] == sel["sr_no"])]
     c = st.columns(4)
     c[0].metric("Students", len(cls))
     c[1].metric("Marksheets found", int((cls["status"] == "OK").sum()))
@@ -282,16 +325,23 @@ def page_fix(source, root):
     data = need_data(source, root)
     if data is None:
         return
-    df = data["combined"]
-    bad = df[df["status"].isin(UNRESOLVED)]
     runner = get_runner()
-    if bad.empty:
-        st.success("Every roll number has a marksheet.")
+    if data.get("remote"):
+        sm = data["summary"]
+        grp = (sm[sm["not_found"] > 0].rename(columns={"not_found": "without_marksheet", "statuses": "status"})
+               [["notification", "sr_no", "course", "year", "without_marksheet", "status", "tried", "result_date"]]
+               .reset_index(drop=True))
+        bad = grp
     else:
-        grp = (bad.groupby(["notification", "sr_no", "course", "year"], sort=False)
+        df = data["combined"]
+        bad = df[df["status"].isin(UNRESOLVED)]
+        grp = None if bad.empty else (bad.groupby(["notification", "sr_no", "course", "year"], sort=False)
                .agg(without_marksheet=("roll_no", "count"), status=("status", lambda x: ", ".join(sorted(set(x)))),
                     tried=("exam_code", lambda x: ", ".join(sorted({v for v in x if v}))),
                     result_date=("result_date", "first")).reset_index())
+    if bad.empty:
+        st.success("Every roll number has a marksheet.")
+    else:
         st.dataframe(grp.drop(columns=["year"]).rename(columns=lambda c: c.replace("_", " ")), hide_index=True)
         labels = [f"{r['notification'][:36]}  |  {r['sr_no']}. {r['course'][:60]}  |  {r['without_marksheet']} roll(s)  |  "
                   f"{r['status']}" for _, r in grp.iterrows()]
@@ -338,7 +388,17 @@ def page_fix(source, root):
 
         xlsx = Path(root) / str(g["year"]) / f"{g['notification']}.xlsx"
         st.divider()
-        if xlsx.exists():
+        if data.get("remote"):
+            st.caption("After choosing the exam, queue the work again; any computer running 'python jw_cloud.py work' "
+                       "then fetches only these roll numbers.")
+            if st.button("Queue these roll numbers again"):
+                try:
+                    import jw_cloud
+                    r = jw_cloud.plan(js.get_client())
+                    st.success(f"Queued {r['new_jobs']} job(s) with {r['new_rolls']} roll number(s).")
+                except Exception as e:
+                    st.error(f"{type(e).__name__}: {str(e)[:200]}")
+        elif xlsx.exists():
             if st.button("Fetch the marksheets for this notification now (then upload to Supabase)",
                          disabled=runner.running()):
                 cmds = [py("marksheet_fetcher.py", str(xlsx), "--no-ask")]
