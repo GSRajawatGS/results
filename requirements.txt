@@ -1,0 +1,9 @@
+pandas
+openpyxl
+supabase
+playwright
+pdfplumber
+selenium
+python-dotenv
+streamlit>=1.30
+ddddocr
