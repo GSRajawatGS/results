@@ -283,7 +283,7 @@ def page_search(source, root):
                 txt = js.get_raw(source, root, row["notification"], row["roll_no"], row["sr_no"])
             except Exception as e:
                 txt = f"(could not load: {type(e).__name__}: {str(e)[:150]})"
-            st.code(txt or "(not saved)", language=None)
+            st.code(txt or ("(the full text is not kept online, to save space - the fields above hold the marks)" if source == "Supabase" else "(not saved)"), language=None)
         else:
             st.caption("No marksheet for this row.")
 
