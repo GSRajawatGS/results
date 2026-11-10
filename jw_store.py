@@ -399,6 +399,7 @@ def fetch_all(client, table, columns="*", order=(), page=1000, where=None):
         start += page
 
 
+STORE_RAW_TEXT = os.environ.get("JW_STORE_RAW") == "1"   # the full marksheet text is NOT uploaded unless this is set (saves space)
 MS_ONLY_IN_RESULTS = ("year", "course", "result", "result_date")
 
 
@@ -408,7 +409,8 @@ def _ms_rows(ms, raw):
         r = {k: (None if (isinstance(v, float) and math.isnan(v)) else v) for k, v in r.items()}
         for k in MS_ONLY_IN_RESULTS:               # these live in notification_results, not in the marksheets table
             r.pop(k, None)
-        r["raw_text"] = raw.get(r["roll_no"])
+        if STORE_RAW_TEXT:
+            r["raw_text"] = raw.get(r["roll_no"])
         rows.append(r)
     return rows
 
@@ -649,12 +651,15 @@ def load(source, root):
 def get_raw(source, root, notification, roll, sr_no="", client=None):
     """The full text of one marksheet (loaded only when asked for)."""
     if source == "Supabase":
-        q = ((client or get_client()).table("marksheets").select("raw_text").eq("notification", notification)
-             .eq("roll_no", roll))
-        if sr_no:
-            q = q.eq("sr_no", sr_no)
-        rows = q.limit(1).execute().data or []
-        return s(rows[0].get("raw_text")) if rows else ""
+        try:
+            q = ((client or get_client()).table("marksheets").select("raw_text").eq("notification", notification)
+                 .eq("roll_no", roll))
+            if sr_no:
+                q = q.eq("sr_no", sr_no)
+            rows = q.limit(1).execute().data or []
+            return s(rows[0].get("raw_text")) if rows else ""
+        except Exception:                                   # the column was dropped to save space
+            return ""
     for fy in year_folders(root):
         mp = fy / f"{notification}_MARKSHEETS.xlsx"
         if mp.exists():
