@@ -5,4 +5,5 @@ playwright
 pdfplumber
 selenium
 python-dotenv
-supabase
+streamlit>=1.30
+ddddocr
